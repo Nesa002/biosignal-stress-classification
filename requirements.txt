@@ -1,2 +1,3 @@
 wfdb
 numpy
+scipy
