@@ -1,3 +1,6 @@
 wfdb
 numpy
 scipy
+pandas
+matplotlib
+scikit-learn
