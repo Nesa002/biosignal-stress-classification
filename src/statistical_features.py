@@ -25,6 +25,31 @@ def extract_statistical_features(signal_1d: np.ndarray, sampling_frequency: floa
     }
 
 
+def extract_hr_variability_features(hr_window_1d: np.ndarray, sampling_frequency: float) -> dict:
+    """
+    Successive-difference HRV proxies: RMSSD/SDSD-analogue stats on the 1 Hz HR-in-bpm series.
+
+    Not canonical HRV -- RMSSD/SDSD and friends are defined on beat-to-beat RR
+    intervals from a raw ECG/PPG waveform, and this dataset only has HR
+    pre-averaged to 1 Hz bpm, with no raw PPG/BVP channel to detect systolic
+    peaks from (see extract_hr_features in src/features.py). These are the
+    closest reachable proxy: descriptive stats of consecutive differences in
+    the bpm series, mirroring extract_statistical_features's mean/std/slope
+    treatment of raw signals, but applied to the first-difference series.
+    """
+    diffs = np.diff(hr_window_1d)
+    if len(diffs) == 0:
+        return {f"hr_successive_diff_{stat}": 0.0 for stat in ("rms", "std", "min", "max", "median", "slope")}
+    return {
+        "hr_successive_diff_rms": float(np.sqrt(np.mean(diffs ** 2))),
+        "hr_successive_diff_std": float(np.std(diffs)),
+        "hr_successive_diff_min": float(np.min(diffs)),
+        "hr_successive_diff_max": float(np.max(diffs)),
+        "hr_successive_diff_median": float(np.median(diffs)),
+        "hr_successive_diff_slope": compute_slope(diffs, sampling_frequency),
+    }
+
+
 def extract_window_statistical_features(window: dict, sampling_frequency: float, signal_names: list[str]) -> dict:
     """
     Dispatch each channel in a window to `extract_statistical_features` and merge the results.
@@ -44,7 +69,9 @@ def extract_window_statistical_features(window: dict, sampling_frequency: float,
     if "temp" in signal_names:
         features.update(extract_statistical_features(signal[:, signal_names.index("temp")], sampling_frequency, "temp"))
     if "hr" in signal_names:
-        features.update(extract_statistical_features(signal[:, signal_names.index("hr")], sampling_frequency, "hr"))
+        hr_signal = signal[:, signal_names.index("hr")]
+        features.update(extract_statistical_features(hr_signal, sampling_frequency, "hr"))
+        features.update(extract_hr_variability_features(hr_signal, sampling_frequency))
     if "SpO2" in signal_names:
         features.update(extract_statistical_features(signal[:, signal_names.index("SpO2")], sampling_frequency, "spo2"))
 

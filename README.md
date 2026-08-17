@@ -8,7 +8,7 @@ The analysis is built on the *Non-EEG Dataset for Assessment of Neurological Sta
 
 ## Approach
 
-Raw signals are filtered and normalized per subject, then split into overlapping 60-second windows (30-second step) within each phase. Two complementary feature sets are extracted per window: frequency-domain descriptors (via Welch's method, including physiologically defined band powers for EDA and heart-rate variability) and time-domain statistical descriptors (mean, standard deviation, skewness, slope). Three classifiers — Logistic Regression, Random Forest, and Gradient Boosting — are trained and compared using subject-grouped 5-fold cross-validation, with macro-averaged F1 as the primary metric to account for class imbalance.
+Raw signals are filtered and normalized per subject, then split into overlapping 60-second windows (30-second step) within each phase. Two complementary feature sets are extracted per window: frequency-domain descriptors (via Welch's method, including physiologically defined band powers for EDA and heart-rate variability) and time-domain statistical descriptors (mean, standard deviation, skewness, slope, plus successive-difference statistics for heart rate as a proxy for beat-to-beat variability). Three classifiers — Logistic Regression, Random Forest, and Gradient Boosting — are trained and compared using subject-grouped 5-fold cross-validation, with macro-averaged F1 as the primary metric to account for class imbalance.
 
 ## Result
 
