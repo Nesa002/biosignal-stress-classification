@@ -8,6 +8,11 @@ Produces, under outputs/figures/:
   - subject1_filter_{eda,temp}.png                 -- filtered-vs-raw + residual, zoomed
   - subject1_spectrogram_{acc,eda,hr}.png          -- Relax vs. a stress phase, per signal
   - confusion_matrices.png                         -- 3-panel, tuned models, all 20 subjects
+  - model_comparison.png                           -- tuned macro-F1 bar chart, 3 models
+  - permutation_importance.png                     -- top-15 features, untuned RF
+
+And, under outputs/models/:
+  - best_model_<name>.joblib                       -- best tuned pipeline, refit on all data
 
 Run from anywhere: `python scripts/export_thesis_figures.py`.
 """
@@ -18,16 +23,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import joblib
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.inspection import permutation_importance
 from sklearn.metrics import ConfusionMatrixDisplay
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 from src.data_quality import clean_features
 from src.features import compute_acc_magnitude, compute_spectrogram, extract_window_features
-from src.modeling import PARAM_GRIDS, build_models, run_cv, tune_models
+from src.modeling import PARAM_GRIDS, RANDOM_STATE, build_models, run_cv, tune_models
 from src.preprocessing import (
     assemble_subject_rows,
     filter_signal,
@@ -48,6 +58,7 @@ LOW_IMPORTANCE_COLUMNS = [
 ]
 
 FIGURES_DIR = ROOT / "outputs" / "figures"
+MODELS_DIR = ROOT / "outputs" / "models"
 DPI = 200
 
 
@@ -255,8 +266,22 @@ def build_combined_features():
     return combined_features_df
 
 
-def export_confusion_matrices():
-    print("== confusion matrices (all 20 subjects, tuned models) ==")
+def run_full_pipeline():
+    """
+    Builds the combined feature table (all 20 subjects), grid-searches and
+    cross-validates all three models. Shared by every Section D figure so the
+    expensive GridSearchCV only runs once.
+
+    Returns (X, y, results, tuned):
+      - results is run_cv's per-model dict (oof_predictions, oof_macro_f1,
+        fold_macro_f1_mean/std), keyed in build_models() order (Logistic
+        Regression, Random Forest, Gradient Boosting).
+      - tuned is tune_models' per-model dict (pipeline, best_params). Its
+        "pipeline" ends up refit on just the last CV fold (run_cv mutates
+        the same objects afterwards for evaluation), so export_best_model
+        rebuilds a fresh pipeline from "best_params" and refits it on the
+        full dataset rather than reusing "pipeline" directly.
+    """
     print("  building combined feature table for all 20 subjects...")
     combined_features_df = build_combined_features()
 
@@ -271,7 +296,11 @@ def export_confusion_matrices():
     tuned = tune_models(X, y, groups, models, PARAM_GRIDS)
     tuned_models = {name: info["pipeline"] for name, info in tuned.items()}
     results = run_cv(X, y, groups, tuned_models)
+    return X, y, results, tuned
 
+
+def export_confusion_matrices(y, results):
+    print("== confusion matrices (all 20 subjects, tuned models) ==")
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
     for ax, (model_name, r) in zip(axes, results.items()):
         ConfusionMatrixDisplay.from_predictions(
@@ -283,11 +312,79 @@ def export_confusion_matrices():
     save(fig, "confusion_matrices.png")
 
 
+def export_model_comparison(results):
+    print("== model comparison bar chart (tuned models) ==")
+    summary_df = pd.DataFrame([
+        {"model": name, "oof_macro_f1": r["oof_macro_f1"], "fold_macro_f1_std": r["fold_macro_f1_std"]}
+        for name, r in results.items()
+    ]).sort_values("oof_macro_f1")
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    bars = ax.barh(summary_df["model"], summary_df["oof_macro_f1"], xerr=summary_df["fold_macro_f1_std"], color="steelblue", capsize=4)
+    ax.set_xlabel("Macro-averaged F1 (out-of-fold)")
+    ax.set_xlim(0, 1)
+    ax.set_title("Tuned model comparison -- 5-fold subject-grouped cross-validation")
+    ax.grid(axis="x", alpha=0.3)
+    for bar, value, std in zip(bars, summary_df["oof_macro_f1"], summary_df["fold_macro_f1_std"]):
+        label_x = min(value + std + 0.02, 0.94)
+        ax.text(label_x, bar.get_y() + bar.get_height() / 2, f"{value:.3f}", va="center", fontsize=9)
+    fig.tight_layout()
+    save(fig, "model_comparison.png")
+
+
+def export_permutation_importance(X, y, top_n=15):
+    print("== permutation importance bar chart ==")
+    # Matches thesis_overview.ipynb section 8: an untuned RF (n_estimators=300,
+    # library defaults otherwise), fit on the full feature table -- deliberately
+    # not the tuned pipeline, to match the numbers already reported in the thesis.
+    pipeline = Pipeline([
+        ("scaler", StandardScaler()),
+        ("clf", RandomForestClassifier(n_estimators=300, class_weight="balanced", random_state=RANDOM_STATE)),
+    ])
+    pipeline.fit(X, y)
+    result = permutation_importance(
+        pipeline, X, y, n_repeats=15, random_state=RANDOM_STATE, scoring="f1_macro", n_jobs=-1
+    )
+    importance_df = pd.DataFrame({
+        "feature": X.columns, "importance": result.importances_mean,
+    }).sort_values("importance", ascending=False).head(top_n)
+
+    fig, ax = plt.subplots(figsize=(8, 0.35 * top_n + 1.5))
+    ax.barh(importance_df["feature"][::-1], importance_df["importance"][::-1], color="steelblue")
+    ax.set_xlabel("Permutation importance (Δ macro-F1)")
+    ax.set_title(f"Top {top_n} features by permutation importance")
+    ax.grid(axis="x", alpha=0.3)
+    fig.tight_layout()
+    save(fig, "permutation_importance.png")
+
+
+def export_best_model(X, y, results, tuned):
+    print("== exporting best model (refit on full dataset) ==")
+    best_name = max(results, key=lambda name: results[name]["oof_macro_f1"])
+    best_params = tuned[best_name]["best_params"]
+    print(f"  best model: {best_name} (macro-F1={results[best_name]['oof_macro_f1']:.3f}), params={best_params}")
+
+    pipeline = build_models()[best_name]
+    pipeline.set_params(**best_params)
+    pipeline.fit(X, y)
+
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    slug = best_name.lower().replace(" ", "_")
+    path = MODELS_DIR / f"best_model_{slug}.joblib"
+    joblib.dump(pipeline, path)
+    print(f"  saved {path.relative_to(ROOT)}")
+
+
 def main():
     export_raw_channels()
     export_filter_effect()
     export_spectrograms()
-    export_confusion_matrices()
+    print("== full pipeline (all 20 subjects, tuned models) ==")
+    X, y, results, tuned = run_full_pipeline()
+    export_confusion_matrices(y, results)
+    export_model_comparison(results)
+    export_permutation_importance(X, y)
+    export_best_model(X, y, results, tuned)
     print(f"\ndone -- figures in {FIGURES_DIR.relative_to(ROOT)}")
 
 
